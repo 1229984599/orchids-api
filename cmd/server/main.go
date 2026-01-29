@@ -12,7 +12,9 @@ import (
 	"orchids-api/internal/config"
 	"orchids-api/internal/debug"
 	"orchids-api/internal/handler"
+	"orchids-api/internal/keeper"
 	"orchids-api/internal/loadbalancer"
+	"orchids-api/internal/logger"
 	"orchids-api/internal/middleware"
 	"orchids-api/internal/store"
 	"orchids-api/web"
@@ -64,8 +66,18 @@ func main() {
 
 	lb := loadbalancer.New(s)
 	defer lb.Close() // 确保程序退出时关闭负载均衡器，刷新待更新的计数
-	apiHandler := api.New(s)
-	h := handler.NewWithLoadBalancer(cfg, lb)
+
+	// 启动账号保活服务
+	accountKeeper := keeper.New(s)
+	accountKeeper.Start()
+	defer accountKeeper.Stop()
+
+	// 创建请求日志收集器
+	requestLogger := logger.New()
+	log.Println("请求日志系统已初始化")
+
+	apiHandler := api.NewWithKeeperAndLogger(s, accountKeeper, requestLogger)
+	h := handler.NewWithAll(cfg, lb, accountKeeper, requestLogger)
 
 	mux := http.NewServeMux()
 
@@ -73,8 +85,16 @@ func main() {
 
 	mux.HandleFunc("/api/accounts", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleAccounts))
 	mux.HandleFunc("/api/accounts/", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleAccountByID))
+	mux.HandleFunc("/api/accounts/health", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleAccountsHealth))
+	mux.HandleFunc("/api/refresh-all", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleRefreshAll))
+	mux.HandleFunc("/api/batch-delete", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleBatchDelete))
 	mux.HandleFunc("/api/export", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleExport))
 	mux.HandleFunc("/api/import", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleImport))
+
+	// 日志相关 API
+	mux.HandleFunc("/api/logs", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleLogs))
+	mux.HandleFunc("/api/logs/stream", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleLogsSSE))
+	mux.HandleFunc("/api/logs/stats", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleLogsStats))
 
 	mux.HandleFunc(cfg.AdminPath+"/", middleware.BasicAuthHandler(cfg.AdminUser, cfg.AdminPass, http.StripPrefix(cfg.AdminPath, web.StaticHandler())))
 

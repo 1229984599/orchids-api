@@ -249,9 +249,45 @@
         font-size: 0.875rem;
         margin-top: 4px;
       }
+      .btn-warning {
+        background: #f59e0b;
+        color: white;
+      }
+      .btn-warning:hover {
+        background: #d97706;
+      }
+      .btn-success {
+        background: #22c55e;
+        color: white;
+      }
+      .btn-success:hover {
+        background: #16a34a;
+      }
+      .status-active {
+        background: rgba(34, 197, 94, 0.2);
+        color: #22c55e;
+      }
+      .status-inactive {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+      }
+      .status-unknown {
+        background: rgba(161, 161, 170, 0.2);
+        color: #a1a1aa;
+      }
+      .checkbox-cell {
+        width: 40px;
+        text-align: center;
+      }
+      .checkbox-cell input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
+      }
       .actions {
         display: flex;
         gap: 8px;
+        flex-wrap: wrap;
       }
       .empty-state {
         text-align: center;
@@ -267,7 +303,7 @@
     <div class="container">
       <header>
         <h1>API 管理面板</h1>
-        <p>多账号管理与负载均衡</p>
+        <p>多账号管理与负载均衡 | <a href="logs.html" style="color: #06b6d4; text-decoration: none;">查看实时日志</a></p>
       </header>
 
       <div class="stats">
@@ -283,12 +319,26 @@
           <div class="stat-value" id="totalRequests">0</div>
           <div class="stat-label">总请求数</div>
         </div>
+        <div class="stat-card">
+          <div class="stat-value" id="totalSuccess" style="background: linear-gradient(90deg, #22c55e, #16a34a); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">0</div>
+          <div class="stat-label">成功请求</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="totalFailure" style="background: linear-gradient(90deg, #ef4444, #dc2626); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">0</div>
+          <div class="stat-label">失败请求</div>
+        </div>
       </div>
 
       <div class="card">
         <div class="card-header">
           <h2 class="card-title">账号管理</h2>
           <div class="actions">
+            <button class="btn btn-success" onclick="refreshAll()">
+              一键刷新
+            </button>
+            <button class="btn btn-danger" onclick="batchDelete()" id="batchDeleteBtn" style="display: none;">
+              批量删除 (<span id="selectedCount">0</span>)
+            </button>
             <button class="btn btn-primary" onclick="exportAccounts()">
               导出
             </button>
@@ -392,15 +442,108 @@
 
     <script>
       let accounts = [];
+      let selectedIds = new Set();
+      let healthStatus = {}; // 账号健康状态
 
       async function loadAccounts() {
         try {
-          const res = await fetch("/api/accounts");
-          accounts = await res.json();
+          const [accountsRes, healthRes] = await Promise.all([
+            fetch("/api/accounts"),
+            fetch("/api/accounts/health")
+          ]);
+          accounts = await accountsRes.json();
+
+          // 解析健康状态
+          try {
+            const healthData = await healthRes.json();
+            healthStatus = {};
+            if (healthData.accounts) {
+              healthData.accounts.forEach(h => {
+                healthStatus[h.account_id] = h.is_healthy;
+              });
+            }
+          } catch (e) {
+            healthStatus = {};
+          }
+
+          selectedIds.clear();
           renderAccounts();
           updateStats();
+          updateBatchDeleteBtn();
         } catch (err) {
           console.error("Failed to load accounts:", err);
+        }
+      }
+
+      function getHealthBadge(accountId) {
+        if (healthStatus[accountId] === true) {
+          return '<span class="status-badge status-active">激活</span>';
+        } else if (healthStatus[accountId] === false) {
+          return '<span class="status-badge status-inactive">未激活</span>';
+        }
+        return '<span class="status-badge status-unknown">未知</span>';
+      }
+
+      function toggleSelectAll(checkbox) {
+        if (checkbox.checked) {
+          accounts.forEach(acc => selectedIds.add(acc.id));
+        } else {
+          selectedIds.clear();
+        }
+        renderAccounts();
+        updateBatchDeleteBtn();
+      }
+
+      function toggleSelect(id) {
+        if (selectedIds.has(id)) {
+          selectedIds.delete(id);
+        } else {
+          selectedIds.add(id);
+        }
+        updateBatchDeleteBtn();
+      }
+
+      function updateBatchDeleteBtn() {
+        const btn = document.getElementById("batchDeleteBtn");
+        const count = document.getElementById("selectedCount");
+        if (selectedIds.size > 0) {
+          btn.style.display = "inline-block";
+          count.textContent = selectedIds.size;
+        } else {
+          btn.style.display = "none";
+        }
+      }
+
+      async function refreshAll() {
+        if (!confirm("确定要刷新所有账号吗？这可能需要一些时间。")) return;
+        try {
+          const res = await fetch("/api/refresh-all", { method: "POST" });
+          const result = await res.json();
+          if (result.success) {
+            alert("刷新任务已启动，正在后台执行...");
+          } else {
+            alert("刷新失败: " + (result.message || "未知错误"));
+          }
+        } catch (err) {
+          alert("刷新失败: " + err.message);
+        }
+      }
+
+      async function batchDelete() {
+        if (selectedIds.size === 0) return;
+        if (!confirm(`确定要删除选中的 ${selectedIds.size} 个账号吗？此操作不可恢复！`)) return;
+
+        try {
+          const res = await fetch("/api/batch-delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: Array.from(selectedIds) }),
+          });
+          const result = await res.json();
+          alert(`删除完成: 成功 ${result.deleted} 个, 失败 ${result.failed} 个`);
+          loadAccounts();
+        } catch (err) {
+          alert("批量删除失败: " + err.message);
         }
       }
 
@@ -412,15 +555,22 @@
           return;
         }
 
+        const allSelected = accounts.length > 0 && accounts.every(acc => selectedIds.has(acc.id));
+
         container.innerHTML = `
                 <table>
                     <thead>
                         <tr>
+                            <th class="checkbox-cell">
+                                <input type="checkbox" ${allSelected ? 'checked' : ''} onchange="toggleSelectAll(this)" title="全选/取消全选" />
+                            </th>
                             <th>名称</th>
                             <th>Email</th>
                             <th>权重</th>
                             <th>请求数</th>
-                            <th>状态</th>
+                            <th>成功/失败</th>
+                            <th>激活状态</th>
+                            <th>启用状态</th>
                             <th>操作</th>
                         </tr>
                     </thead>
@@ -429,10 +579,21 @@
                           .map(
                             (acc) => `
                             <tr>
+                                <td class="checkbox-cell">
+                                    <input type="checkbox" ${selectedIds.has(acc.id) ? 'checked' : ''} onchange="toggleSelect(${acc.id})" />
+                                </td>
                                 <td>${escapeHtml(acc.name)}</td>
                                 <td>${escapeHtml(acc.email)}</td>
                                 <td>${acc.weight}</td>
                                 <td>${acc.request_count || 0}</td>
+                                <td>
+                                    <span style="color: #22c55e;">${acc.success_count || 0}</span>
+                                    /
+                                    <span style="color: #ef4444;">${acc.failure_count || 0}</span>
+                                </td>
+                                <td>
+                                    ${getHealthBadge(acc.id)}
+                                </td>
                                 <td>
                                     <span class="status-badge ${acc.enabled ? "status-enabled" : "status-disabled"}">
                                         ${acc.enabled ? "已启用" : "已禁用"}
@@ -440,6 +601,7 @@
                                 </td>
                                 <td>
                                     <div class="actions">
+                                        <button class="btn btn-sm" style="background: #22c55e; color: white;" onclick="testAccount(${acc.id}, '${escapeHtml(acc.name)}')" id="test-btn-${acc.id}">激活</button>
                                         <button class="btn btn-primary btn-sm" onclick="editAccount(${acc.id})">编辑</button>
                                         <button class="btn btn-danger btn-sm" onclick="deleteAccount(${acc.id})">删除</button>
                                     </div>
@@ -461,6 +623,53 @@
           (sum, a) => sum + (a.request_count || 0),
           0,
         );
+        document.getElementById("totalSuccess").textContent = accounts.reduce(
+          (sum, a) => sum + (a.success_count || 0),
+          0,
+        );
+        document.getElementById("totalFailure").textContent = accounts.reduce(
+          (sum, a) => sum + (a.failure_count || 0),
+          0,
+        );
+      }
+
+      // 测试账号激活
+      async function testAccount(id, name) {
+        const btn = document.getElementById(`test-btn-${id}`);
+        const originalText = btn.textContent;
+        btn.textContent = "测试中...";
+        btn.disabled = true;
+        btn.style.background = "#6b7280";
+
+        try {
+          const res = await fetch(`/api/accounts/${id}/test`, {
+            method: "POST",
+          });
+          const result = await res.json();
+
+          if (result.success) {
+            btn.textContent = "成功";
+            btn.style.background = "#22c55e";
+            alert(`账号 "${name}" 激活成功!\n\n耗时: ${result.duration_ms}ms\n响应: ${result.response || '无'}`);
+            // 刷新账号列表以更新健康状态
+            loadAccounts();
+          } else {
+            btn.textContent = "失败";
+            btn.style.background = "#ef4444";
+            alert(`账号 "${name}" 激活失败!\n\n错误: ${result.message}\n耗时: ${result.duration_ms}ms`);
+          }
+        } catch (err) {
+          btn.textContent = "错误";
+          btn.style.background = "#ef4444";
+          alert(`测试请求失败: ${err.message}`);
+        }
+
+        // 3秒后恢复按钮状态
+        setTimeout(() => {
+          btn.textContent = originalText;
+          btn.disabled = false;
+          btn.style.background = "#22c55e";
+        }, 3000);
       }
 
       function openModal(account = null) {

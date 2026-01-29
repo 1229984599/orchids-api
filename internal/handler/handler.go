@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,16 +17,33 @@ import (
 	"orchids-api/internal/client"
 	"orchids-api/internal/config"
 	"orchids-api/internal/debug"
+	"orchids-api/internal/keeper"
 	"orchids-api/internal/loadbalancer"
+	"orchids-api/internal/logger"
 	"orchids-api/internal/prompt"
 	"orchids-api/internal/store"
 	"orchids-api/internal/tiktoken"
 )
 
 type Handler struct {
-	config       *config.Config
-	client       UpstreamClient
-	loadBalancer *loadbalancer.LoadBalancer
+	config        *config.Config
+	client        UpstreamClient
+	loadBalancer  *loadbalancer.LoadBalancer
+	keeper        *keeper.AccountKeeper
+	requestLogger *logger.RequestLogger
+}
+
+// 重试配置
+const (
+	MaxRetryCount  = 3                      // 最大重试次数
+	BaseRetryDelay = 100 * time.Millisecond // 基础重试延迟
+)
+
+// generateRequestID 生成唯一请求 ID
+func generateRequestID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 type UpstreamClient interface {
@@ -50,6 +69,23 @@ func NewWithLoadBalancer(cfg *config.Config, lb *loadbalancer.LoadBalancer) *Han
 	return &Handler{
 		config:       cfg,
 		loadBalancer: lb,
+	}
+}
+
+func NewWithLoadBalancerAndKeeper(cfg *config.Config, lb *loadbalancer.LoadBalancer, k *keeper.AccountKeeper) *Handler {
+	return &Handler{
+		config:       cfg,
+		loadBalancer: lb,
+		keeper:       k,
+	}
+}
+
+func NewWithAll(cfg *config.Config, lb *loadbalancer.LoadBalancer, k *keeper.AccountKeeper, l *logger.RequestLogger) *Handler {
+	return &Handler{
+		config:        cfg,
+		loadBalancer:  lb,
+		keeper:        k,
+		requestLogger: l,
 	}
 }
 
@@ -127,6 +163,7 @@ func fixToolInput(inputJSON string) string {
 
 func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+	requestID := generateRequestID()
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -146,6 +183,8 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	// 1. 记录进入的 Claude 请求
 	logger.LogIncomingRequest(req)
 
+	log.Printf("[%s] 新请求进入 model=%s stream=%v", requestID, req.Model, req.Stream)
+
 	// 选择账号
 	var apiClient UpstreamClient
 	var currentAccount *store.Account
@@ -158,12 +197,12 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 				if h.client != nil {
 					apiClient = h.client
 					currentAccount = nil
-					log.Println("负载均衡无可用账号，使用默认配置")
+					log.Printf("[%s] 负载均衡无可用账号，使用默认配置", requestID)
 					return nil
 				}
 				return err
 			}
-			log.Printf("使用账号: %s (%s)", account.Name, account.Email)
+			log.Printf("[%s] 使用账号: %s (%s)", requestID, account.Name, account.Email)
 			apiClient = client.NewFromAccount(account)
 			currentAccount = account
 			return nil
@@ -194,7 +233,7 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 	// 映射模型
 	mappedModel := mapModel(req.Model)
-	log.Printf("模型映射: %s -> %s", req.Model, mappedModel)
+	log.Printf("[%s] 模型映射: %s -> %s", requestID, req.Model, mappedModel)
 
 	isStream := req.Stream
 	var flusher http.Flusher
@@ -257,6 +296,24 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		logger.LogOutputSSE(event, data)
 	}
 
+	// 发送 message_start
+	startData, _ := json.Marshal(map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":      msgID,
+			"type":    "message",
+			"role":    "assistant",
+			"content": []interface{}{},
+			"model":   req.Model,
+			"usage":   map[string]int{"input_tokens": inputTokens, "output_tokens": 0},
+		},
+	})
+	writeSSE("message_start", string(startData))
+
+	done := make(chan struct{})
+	var retryCount int
+
+	// 完成响应的闭包需要移到 retryCount 声明之后
 	finishResponse := func(stopReason string) {
 		mu.Lock()
 		if hasReturn {
@@ -281,26 +338,24 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 		// 6. 记录摘要
 		logger.LogSummary(inputTokens, outputTokens, time.Since(startTime), stopReason)
-		log.Printf("请求完成: 输入=%d tokens, 输出=%d tokens, 耗时=%v", inputTokens, outputTokens, time.Since(startTime))
+		log.Printf("[%s] 请求完成: 输入=%d tokens, 输出=%d tokens, 耗时=%v, 重试=%d",
+			requestID, inputTokens, outputTokens, time.Since(startTime), retryCount)
+
+		// 记录到实时日志系统
+		if h.requestLogger != nil {
+			accountName := "default"
+			var accountID int64
+			if currentAccount != nil {
+				accountName = currentAccount.Name
+				accountID = currentAccount.ID
+			}
+			success := stopReason != "error"
+			h.requestLogger.LogRequest(requestID, accountID, accountName,
+				fmt.Sprintf("model=%s, input=%d, output=%d, retries=%d",
+					req.Model, inputTokens, outputTokens, retryCount),
+				time.Since(startTime).Milliseconds(), success)
+		}
 	}
-
-	// 发送 message_start
-	startData, _ := json.Marshal(map[string]interface{}{
-		"type": "message_start",
-		"message": map[string]interface{}{
-			"id":      msgID,
-			"type":    "message",
-			"role":    "assistant",
-			"content": []interface{}{},
-			"model":   req.Model,
-			"usage":   map[string]int{"input_tokens": inputTokens, "output_tokens": 0},
-		},
-	})
-	writeSSE("message_start", string(startData))
-
-	log.Println("新请求进入")
-
-	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
@@ -507,18 +562,44 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 			}, logger)
 
 			if err != nil {
-				log.Printf("Error: %v", err)
+				log.Printf("[%s] Error: %v", requestID, err)
 				if currentAccount != nil && h.loadBalancer != nil {
+					// 记录失败
+					h.loadBalancer.ScheduleFailureCount(currentAccount.ID)
 					failedAccountIDs = append(failedAccountIDs, currentAccount.ID)
-					log.Printf("账号 %s 请求失败，尝试切换账号 (已排除 %d 个)", currentAccount.Name, len(failedAccountIDs))
+					retryCount++
+
+					// 检查是否超过最大重试次数
+					if retryCount >= MaxRetryCount {
+						log.Printf("[%s] 已达到最大重试次数 (%d)，停止重试", requestID, MaxRetryCount)
+						finishResponse("end_turn")
+						break
+					}
+
+					log.Printf("[%s] 账号 %s 请求失败，尝试切换账号 (重试 %d/%d, 已排除 %d 个)",
+						requestID, currentAccount.Name, retryCount, MaxRetryCount, len(failedAccountIDs))
+
+					// 指数退避：100ms, 200ms, 400ms...
+					backoff := time.Duration(1<<(retryCount-1)) * BaseRetryDelay
+					log.Printf("[%s] 等待 %v 后重试...", requestID, backoff)
+					time.Sleep(backoff)
+
 					if retryErr := selectAccount(); retryErr == nil {
-						log.Printf("切换到账号: %s，重新发送请求", currentAccount.Name)
+						log.Printf("[%s] 切换到账号: %s，重新发送请求", requestID, currentAccount.Name)
 						continue
 					} else {
-						log.Printf("无更多可用账号: %v", retryErr)
+						log.Printf("[%s] 无更多可用账号: %v", requestID, retryErr)
 					}
 				}
 				finishResponse("end_turn")
+			} else {
+				// 请求成功，记录成功计数并标记账号为活跃
+				if currentAccount != nil && h.loadBalancer != nil {
+					h.loadBalancer.ScheduleSuccessCount(currentAccount.ID)
+				}
+				if currentAccount != nil && h.keeper != nil {
+					h.keeper.MarkAccountActive(currentAccount.ID)
+				}
 			}
 			break
 		}

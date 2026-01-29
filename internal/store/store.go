@@ -22,6 +22,8 @@ type Account struct {
 	Weight       int       `json:"weight"`
 	Enabled      bool      `json:"enabled"`
 	RequestCount int64     `json:"request_count"`
+	SuccessCount int64     `json:"success_count"`
+	FailureCount int64     `json:"failure_count"`
 	LastUsedAt   time.Time `json:"last_used_at"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -67,6 +69,8 @@ func (s *Store) migrate() error {
 			weight INTEGER DEFAULT 1,
 			enabled INTEGER DEFAULT 1,
 			request_count INTEGER DEFAULT 0,
+			success_count INTEGER DEFAULT 0,
+			failure_count INTEGER DEFAULT 0,
 			last_used_at DATETIME,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -77,15 +81,41 @@ func (s *Store) migrate() error {
 			value TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_enabled ON accounts(enabled)`,
+		// 迁移：添加 success_count 和 failure_count 列（如果不存在）
+		`ALTER TABLE accounts ADD COLUMN success_count INTEGER DEFAULT 0`,
+		`ALTER TABLE accounts ADD COLUMN failure_count INTEGER DEFAULT 0`,
 	}
 
 	for _, q := range queries {
-		if _, err := s.db.Exec(q); err != nil {
+		_, err := s.db.Exec(q)
+		// 忽略 "duplicate column" 错误（ALTER TABLE 添加已存在列）
+		if err != nil && !isDuplicateColumnError(err) {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// isDuplicateColumnError 检查是否是重复列错误
+func isDuplicateColumnError(err error) bool {
+	return err != nil && (
+		// SQLite 错误消息
+		contains(err.Error(), "duplicate column") ||
+		contains(err.Error(), "already exists"))
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) Close() error {
@@ -142,11 +172,13 @@ func (s *Store) GetAccount(id int64) (*Account, error) {
 	var lastUsedAt sql.NullTime
 	err := s.db.QueryRow(`
 		SELECT id, name, session_id, client_cookie, client_uat, project_id, user_id,
-			   agent_mode, email, weight, enabled, request_count, last_used_at, created_at, updated_at
+			   agent_mode, email, weight, enabled, request_count, success_count, failure_count,
+			   last_used_at, created_at, updated_at
 		FROM accounts WHERE id = ?
 	`, id).Scan(&acc.ID, &acc.Name, &acc.SessionID, &acc.ClientCookie, &acc.ClientUat,
 		&acc.ProjectID, &acc.UserID, &acc.AgentMode, &acc.Email, &acc.Weight,
-		&acc.Enabled, &acc.RequestCount, &lastUsedAt, &acc.CreatedAt, &acc.UpdatedAt)
+		&acc.Enabled, &acc.RequestCount, &acc.SuccessCount, &acc.FailureCount,
+		&lastUsedAt, &acc.CreatedAt, &acc.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +194,8 @@ func (s *Store) ListAccounts() ([]*Account, error) {
 
 	rows, err := s.db.Query(`
 		SELECT id, name, session_id, client_cookie, client_uat, project_id, user_id,
-			   agent_mode, email, weight, enabled, request_count, last_used_at, created_at, updated_at
+			   agent_mode, email, weight, enabled, request_count, success_count, failure_count,
+			   last_used_at, created_at, updated_at
 		FROM accounts ORDER BY id
 	`)
 	if err != nil {
@@ -176,7 +209,8 @@ func (s *Store) ListAccounts() ([]*Account, error) {
 		var lastUsedAt sql.NullTime
 		err := rows.Scan(&acc.ID, &acc.Name, &acc.SessionID, &acc.ClientCookie, &acc.ClientUat,
 			&acc.ProjectID, &acc.UserID, &acc.AgentMode, &acc.Email, &acc.Weight,
-			&acc.Enabled, &acc.RequestCount, &lastUsedAt, &acc.CreatedAt, &acc.UpdatedAt)
+			&acc.Enabled, &acc.RequestCount, &acc.SuccessCount, &acc.FailureCount,
+			&lastUsedAt, &acc.CreatedAt, &acc.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -194,7 +228,8 @@ func (s *Store) GetEnabledAccounts() ([]*Account, error) {
 
 	rows, err := s.db.Query(`
 		SELECT id, name, session_id, client_cookie, client_uat, project_id, user_id,
-			   agent_mode, email, weight, enabled, request_count, last_used_at, created_at, updated_at
+			   agent_mode, email, weight, enabled, request_count, success_count, failure_count,
+			   last_used_at, created_at, updated_at
 		FROM accounts WHERE enabled = 1 ORDER BY id
 	`)
 	if err != nil {
@@ -208,7 +243,8 @@ func (s *Store) GetEnabledAccounts() ([]*Account, error) {
 		var lastUsedAt sql.NullTime
 		err := rows.Scan(&acc.ID, &acc.Name, &acc.SessionID, &acc.ClientCookie, &acc.ClientUat,
 			&acc.ProjectID, &acc.UserID, &acc.AgentMode, &acc.Email, &acc.Weight,
-			&acc.Enabled, &acc.RequestCount, &lastUsedAt, &acc.CreatedAt, &acc.UpdatedAt)
+			&acc.Enabled, &acc.RequestCount, &acc.SuccessCount, &acc.FailureCount,
+			&lastUsedAt, &acc.CreatedAt, &acc.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -238,6 +274,54 @@ func (s *Store) AddRequestCount(id int64, count int64) error {
 
 	_, err := s.db.Exec(`
 		UPDATE accounts SET request_count = request_count + ?, last_used_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, count, id)
+	return err
+}
+
+// IncrementSuccessCount 增加成功计数
+func (s *Store) IncrementSuccessCount(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		UPDATE accounts SET success_count = success_count + 1
+		WHERE id = ?
+	`, id)
+	return err
+}
+
+// IncrementFailureCount 增加失败计数
+func (s *Store) IncrementFailureCount(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		UPDATE accounts SET failure_count = failure_count + 1
+		WHERE id = ?
+	`, id)
+	return err
+}
+
+// AddSuccessCount 批量增加成功计数（用于异步批量更新）
+func (s *Store) AddSuccessCount(id int64, count int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		UPDATE accounts SET success_count = success_count + ?
+		WHERE id = ?
+	`, count, id)
+	return err
+}
+
+// AddFailureCount 批量增加失败计数（用于异步批量更新）
+func (s *Store) AddFailureCount(id int64, count int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		UPDATE accounts SET failure_count = failure_count + ?
 		WHERE id = ?
 	`, count, id)
 	return err

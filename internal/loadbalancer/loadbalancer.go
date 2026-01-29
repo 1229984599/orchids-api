@@ -4,17 +4,18 @@ import (
 	"errors"
 	"log"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
 	"orchids-api/internal/store"
 )
 
-// 账号缓存刷新间隔
-const accountsCacheTTL = 5 * time.Second
+// 账号缓存刷新间隔（从 5 秒改为 30 秒）
+const accountsCacheTTL = 30 * time.Second
 
-// 请求计数批量更新间隔
-const countUpdateInterval = 5 * time.Second
+// 请求计数批量更新间隔（从 5 秒改为 10 秒）
+const countUpdateInterval = 10 * time.Second
 
 type LoadBalancer struct {
 	store *store.Store
@@ -25,16 +26,20 @@ type LoadBalancer struct {
 	lastRefresh time.Time
 
 	// 异步请求计数更新
-	pendingUpdates map[int64]int64
-	updateMu       sync.Mutex
-	stopChan       chan struct{}
-	wg             sync.WaitGroup
+	pendingUpdates  map[int64]int64
+	pendingSuccess  map[int64]int64
+	pendingFailure  map[int64]int64
+	updateMu        sync.Mutex
+	stopChan        chan struct{}
+	wg              sync.WaitGroup
 }
 
 func New(s *store.Store) *LoadBalancer {
 	lb := &LoadBalancer{
 		store:          s,
 		pendingUpdates: make(map[int64]int64),
+		pendingSuccess: make(map[int64]int64),
+		pendingFailure: make(map[int64]int64),
 		stopChan:       make(chan struct{}),
 	}
 
@@ -111,17 +116,36 @@ func (lb *LoadBalancer) backgroundUpdateCounts() {
 // flushPendingUpdates 将待更新的请求计数写入数据库
 func (lb *LoadBalancer) flushPendingUpdates() {
 	lb.updateMu.Lock()
-	if len(lb.pendingUpdates) == 0 {
+	if len(lb.pendingUpdates) == 0 && len(lb.pendingSuccess) == 0 && len(lb.pendingFailure) == 0 {
 		lb.updateMu.Unlock()
 		return
 	}
 	updates := lb.pendingUpdates
+	successUpdates := lb.pendingSuccess
+	failureUpdates := lb.pendingFailure
 	lb.pendingUpdates = make(map[int64]int64)
+	lb.pendingSuccess = make(map[int64]int64)
+	lb.pendingFailure = make(map[int64]int64)
 	lb.updateMu.Unlock()
 
+	// 更新请求计数
 	for accountID, count := range updates {
 		if err := lb.store.AddRequestCount(accountID, count); err != nil {
 			log.Printf("[LoadBalancer] 更新请求计数失败: accountID=%d, count=%d, err=%v", accountID, count, err)
+		}
+	}
+
+	// 更新成功计数
+	for accountID, count := range successUpdates {
+		if err := lb.store.AddSuccessCount(accountID, count); err != nil {
+			log.Printf("[LoadBalancer] 更新成功计数失败: accountID=%d, count=%d, err=%v", accountID, count, err)
+		}
+	}
+
+	// 更新失败计数
+	for accountID, count := range failureUpdates {
+		if err := lb.store.AddFailureCount(accountID, count); err != nil {
+			log.Printf("[LoadBalancer] 更新失败计数失败: accountID=%d, count=%d, err=%v", accountID, count, err)
 		}
 	}
 }
@@ -130,6 +154,20 @@ func (lb *LoadBalancer) flushPendingUpdates() {
 func (lb *LoadBalancer) scheduleCountUpdate(accountID int64) {
 	lb.updateMu.Lock()
 	lb.pendingUpdates[accountID]++
+	lb.updateMu.Unlock()
+}
+
+// ScheduleSuccessCount 调度成功计数更新（异步）
+func (lb *LoadBalancer) ScheduleSuccessCount(accountID int64) {
+	lb.updateMu.Lock()
+	lb.pendingSuccess[accountID]++
+	lb.updateMu.Unlock()
+}
+
+// ScheduleFailureCount 调度失败计数更新（异步）
+func (lb *LoadBalancer) ScheduleFailureCount(accountID int64) {
+	lb.updateMu.Lock()
+	lb.pendingFailure[accountID]++
 	lb.updateMu.Unlock()
 }
 
@@ -187,27 +225,35 @@ func (lb *LoadBalancer) GetNextAccountExcluding(excludeIDs []int64) (*store.Acco
 	return account, nil
 }
 
+// selectAccount 使用前缀和 + 二分查找选择账号（O(log n)）
 func (lb *LoadBalancer) selectAccount(accounts []*store.Account) *store.Account {
 	if len(accounts) == 1 {
 		return accounts[0]
 	}
 
-	var totalWeight int
-	for _, acc := range accounts {
-		totalWeight += acc.Weight
+	// 构建前缀和数组
+	prefixSum := make([]int, len(accounts)+1)
+	for i, acc := range accounts {
+		prefixSum[i+1] = prefixSum[i] + acc.Weight
+	}
+
+	totalWeight := prefixSum[len(accounts)]
+	if totalWeight == 0 {
+		return accounts[0]
 	}
 
 	randomWeight := rand.Intn(totalWeight)
-	currentWeight := 0
 
-	for _, acc := range accounts {
-		currentWeight += acc.Weight
-		if currentWeight > randomWeight {
-			return acc
-		}
+	// 二分查找：找到第一个 prefixSum[i+1] > randomWeight 的 i
+	idx := sort.Search(len(accounts), func(i int) bool {
+		return prefixSum[i+1] > randomWeight
+	})
+
+	if idx >= len(accounts) {
+		idx = len(accounts) - 1
 	}
 
-	return accounts[0]
+	return accounts[idx]
 }
 
 // ForceRefresh 强制刷新账号缓存（用于账号变更后）

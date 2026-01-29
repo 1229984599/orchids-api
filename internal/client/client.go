@@ -96,26 +96,17 @@ func NewFromAccount(acc *store.Account) *Client {
 	}
 }
 
-// GetToken 获取 JWT Token（优先从缓存获取）
+// GetToken 获取 JWT Token（优先从缓存获取，使用 Singleflight 去重）
 func (c *Client) GetToken() (string, error) {
-	// 1. 先尝试从缓存获取
-	if jwt, ok := tokenCache.GetCachedToken(c.config.SessionID); ok {
-		log.Printf("[TokenCache] 缓存命中: session=%s", c.config.SessionID[:16]+"...")
+	return tokenCache.GetOrFetch(c.config.SessionID, func() (string, error) {
+		log.Printf("[TokenCache] 缓存未命中，获取新Token: session=%s", c.config.SessionID[:16]+"...")
+		jwt, err := c.fetchNewToken()
+		if err != nil {
+			return "", err
+		}
+		log.Printf("[TokenCache] Token已缓存: session=%s, TTL=%v", c.config.SessionID[:16]+"...", tokenCacheTTL)
 		return jwt, nil
-	}
-
-	// 2. 缓存未命中，请求新 Token
-	log.Printf("[TokenCache] 缓存未命中，获取新Token: session=%s", c.config.SessionID[:16]+"...")
-	jwt, err := c.fetchNewToken()
-	if err != nil {
-		return "", err
-	}
-
-	// 3. 缓存新 Token
-	tokenCache.SetCachedToken(c.config.SessionID, jwt, tokenCacheTTL)
-	log.Printf("[TokenCache] Token已缓存: session=%s, TTL=%v", c.config.SessionID[:16]+"...", tokenCacheTTL)
-
-	return jwt, nil
+	})
 }
 
 // fetchNewToken 从 Clerk API 获取新的 JWT Token
