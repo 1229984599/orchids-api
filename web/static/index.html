@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API 管理面板</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        min-height: 100vh;
+        color: #e4e4e7;
+      }
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      header {
+        text-align: center;
+        padding: 40px 0;
+      }
+      header h1 {
+        font-size: 2.5rem;
+        background: linear-gradient(90deg, #06b6d4, #8b5cf6);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 10px;
+      }
+      header p {
+        color: #a1a1aa;
+      }
+      .card {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
+        padding: 24px;
+        margin-bottom: 24px;
+        backdrop-filter: blur(10px);
+      }
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+      .card-title {
+        font-size: 1.25rem;
+        font-weight: 600;
+      }
+      .btn {
+        padding: 10px 20px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.875rem;
+        font-weight: 500;
+        transition: all 0.2s;
+      }
+      .btn-primary {
+        background: linear-gradient(90deg, #06b6d4, #8b5cf6);
+        color: white;
+      }
+      .btn-primary:hover {
+        opacity: 0.9;
+        transform: translateY(-1px);
+      }
+      .btn-danger {
+        background: #ef4444;
+        color: white;
+      }
+      .btn-danger:hover {
+        background: #dc2626;
+      }
+      .btn-sm {
+        padding: 6px 12px;
+        font-size: 0.75rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 12px;
+        text-align: left;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+      th {
+        color: #a1a1aa;
+        font-weight: 500;
+        font-size: 0.875rem;
+      }
+      tr:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .status-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 500;
+      }
+      .status-enabled {
+        background: rgba(34, 197, 94, 0.2);
+        color: #22c55e;
+      }
+      .status-disabled {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+      }
+      .modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.7);
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+      }
+      .modal.active {
+        display: flex;
+      }
+      .modal-content {
+        background: #1e1e2e;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
+        padding: 32px;
+        width: 100%;
+        max-width: 500px;
+        max-height: 90vh;
+        overflow-y: auto;
+      }
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 24px;
+      }
+      .modal-title {
+        font-size: 1.5rem;
+        font-weight: 600;
+      }
+      .modal-close {
+        background: none;
+        border: none;
+        color: #a1a1aa;
+        font-size: 1.5rem;
+        cursor: pointer;
+      }
+      .form-group {
+        margin-bottom: 16px;
+      }
+      .form-label {
+        display: block;
+        margin-bottom: 8px;
+        color: #a1a1aa;
+        font-size: 0.875rem;
+      }
+      .form-input {
+        width: 100%;
+        padding: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        color: #e4e4e7;
+        font-size: 0.875rem;
+      }
+      .form-input:focus {
+        outline: none;
+        border-color: #8b5cf6;
+      }
+      .form-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .toggle {
+        position: relative;
+        display: inline-block;
+        width: 48px;
+        height: 24px;
+      }
+      .toggle input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 24px;
+        transition: 0.3s;
+      }
+      .toggle-slider:before {
+        position: absolute;
+        content: "";
+        height: 18px;
+        width: 18px;
+        left: 3px;
+        bottom: 3px;
+        background: white;
+        border-radius: 50%;
+        transition: 0.3s;
+      }
+      .toggle input:checked + .toggle-slider {
+        background: linear-gradient(90deg, #06b6d4, #8b5cf6);
+      }
+      .toggle input:checked + .toggle-slider:before {
+        transform: translateX(24px);
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .stat-card {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+      }
+      .stat-value {
+        font-size: 2rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #06b6d4, #8b5cf6);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .stat-label {
+        color: #a1a1aa;
+        font-size: 0.875rem;
+        margin-top: 4px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+      }
+      .empty-state {
+        text-align: center;
+        padding: 60px 20px;
+        color: #a1a1aa;
+      }
+      .empty-state p {
+        margin-bottom: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>API 管理面板</h1>
+        <p>多账号管理与负载均衡</p>
+      </header>
+
+      <div class="stats">
+        <div class="stat-card">
+          <div class="stat-value" id="totalAccounts">0</div>
+          <div class="stat-label">总账号数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="enabledAccounts">0</div>
+          <div class="stat-label">已启用</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="totalRequests">0</div>
+          <div class="stat-label">总请求数</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">账号管理</h2>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="exportAccounts()">
+              导出
+            </button>
+            <button
+              class="btn btn-primary"
+              onclick="document.getElementById('importFile').click()"
+            >
+              导入
+            </button>
+            <input
+              type="file"
+              id="importFile"
+              accept=".json"
+              style="display: none"
+              onchange="importAccounts(event)"
+            />
+            <button class="btn btn-primary" onclick="openModal()">
+              添加账号
+            </button>
+          </div>
+        </div>
+        <div id="accountsList">
+          <div class="empty-state">
+            <p>暂无账号，点击上方按钮添加</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="accountModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title" id="modalTitle">添加账号</h3>
+          <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <form id="accountForm" onsubmit="saveAccount(event)">
+          <input type="hidden" id="accountId" />
+          <div class="form-group">
+            <label class="form-label">名称</label>
+            <input
+              type="text"
+              class="form-input"
+              id="name"
+              required
+              placeholder="账号名称"
+            />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Client Cookie (__client)</label>
+            <input
+              type="text"
+              class="form-input"
+              id="clientCookie"
+              required
+              placeholder="eyJhbGciOiJ..."
+            />
+            <small style="color: #666; font-size: 12px"
+              >只需输入 __client cookie，其他信息将自动获取</small
+            >
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">权重</label>
+              <input
+                type="number"
+                class="form-input"
+                id="weight"
+                value="1"
+                min="1"
+              />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Agent Mode</label>
+              <input
+                type="text"
+                class="form-input"
+                id="agentMode"
+                value="claude-opus-4.5"
+              />
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">
+              <label class="toggle">
+                <input type="checkbox" id="enabled" checked />
+                <span class="toggle-slider"></span>
+              </label>
+              &nbsp;&nbsp;启用账号
+            </label>
+          </div>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            style="width: 100%; margin-top: 16px"
+          >
+            保存
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <script>
+      let accounts = [];
+
+      async function loadAccounts() {
+        try {
+          const res = await fetch("/api/accounts");
+          accounts = await res.json();
+          renderAccounts();
+          updateStats();
+        } catch (err) {
+          console.error("Failed to load accounts:", err);
+        }
+      }
+
+      function renderAccounts() {
+        const container = document.getElementById("accountsList");
+        if (accounts.length === 0) {
+          container.innerHTML =
+            '<div class="empty-state"><p>暂无账号，点击上方按钮添加</p></div>';
+          return;
+        }
+
+        container.innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>名称</th>
+                            <th>Email</th>
+                            <th>权重</th>
+                            <th>请求数</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${accounts
+                          .map(
+                            (acc) => `
+                            <tr>
+                                <td>${escapeHtml(acc.name)}</td>
+                                <td>${escapeHtml(acc.email)}</td>
+                                <td>${acc.weight}</td>
+                                <td>${acc.request_count || 0}</td>
+                                <td>
+                                    <span class="status-badge ${acc.enabled ? "status-enabled" : "status-disabled"}">
+                                        ${acc.enabled ? "已启用" : "已禁用"}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="actions">
+                                        <button class="btn btn-primary btn-sm" onclick="editAccount(${acc.id})">编辑</button>
+                                        <button class="btn btn-danger btn-sm" onclick="deleteAccount(${acc.id})">删除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        `,
+                          )
+                          .join("")}
+                    </tbody>
+                </table>
+            `;
+      }
+
+      function updateStats() {
+        document.getElementById("totalAccounts").textContent = accounts.length;
+        document.getElementById("enabledAccounts").textContent =
+          accounts.filter((a) => a.enabled).length;
+        document.getElementById("totalRequests").textContent = accounts.reduce(
+          (sum, a) => sum + (a.request_count || 0),
+          0,
+        );
+      }
+
+      function openModal(account = null) {
+        const modal = document.getElementById("accountModal");
+        const title = document.getElementById("modalTitle");
+        const form = document.getElementById("accountForm");
+
+        if (account) {
+          title.textContent = "编辑账号";
+          document.getElementById("accountId").value = account.id;
+          document.getElementById("name").value = account.name;
+          document.getElementById("clientCookie").value = account.client_cookie;
+          document.getElementById("agentMode").value = account.agent_mode;
+          document.getElementById("weight").value = account.weight;
+          document.getElementById("enabled").checked = account.enabled;
+        } else {
+          title.textContent = "添加账号";
+          form.reset();
+          document.getElementById("accountId").value = "";
+          document.getElementById("agentMode").value = "claude-opus-4.5";
+          document.getElementById("weight").value = "1";
+          document.getElementById("enabled").checked = true;
+        }
+
+        modal.classList.add("active");
+      }
+
+      function closeModal() {
+        document.getElementById("accountModal").classList.remove("active");
+      }
+
+      async function saveAccount(e) {
+        e.preventDefault();
+
+        const id = document.getElementById("accountId").value;
+        const data = {
+          name: document.getElementById("name").value,
+          client_cookie: document.getElementById("clientCookie").value,
+          agent_mode: document.getElementById("agentMode").value,
+          weight: parseInt(document.getElementById("weight").value) || 1,
+          enabled: document.getElementById("enabled").checked,
+        };
+
+        try {
+          const url = id ? `/api/accounts/${id}` : "/api/accounts";
+          const method = id ? "PUT" : "POST";
+          const response = await fetch(url, {
+            method,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+          });
+
+          if (!response.ok) {
+            const error = await response.text();
+            throw new Error(error);
+          }
+
+          closeModal();
+          loadAccounts();
+        } catch (err) {
+          alert("保存失败: " + err.message);
+        }
+      }
+
+      function editAccount(id) {
+        const account = accounts.find((a) => a.id === id);
+        if (account) openModal(account);
+      }
+      async function deleteAccount(id) {
+        if (!confirm("确定要删除这个账号吗？")) return;
+        try {
+          const response = await fetch(`/api/accounts/${id}`, {
+            method: "DELETE",
+            headers: {
+              "Content-Type": "application/json",
+            },
+          });
+
+          if (!response.ok) {
+            const error = await response.text();
+            throw new Error(error || `HTTP error! status: ${response.status}`);
+          }
+
+          alert("删除成功");
+          loadAccounts();
+        } catch (err) {
+          console.error("删除失败:", err);
+          alert("删除失败: " + err.message);
+        }
+      }
+
+      function escapeHtml(text) {
+        const div = document.createElement("div");
+        div.textContent = text;
+        return div.innerHTML;
+      }
+
+      function exportAccounts() {
+        window.location.href = "/api/export";
+      }
+
+      async function importAccounts(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        try {
+          const text = await file.text();
+          const res = await fetch("/api/import", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: text,
+          });
+          const result = await res.json();
+          alert(
+            `导入完成: 成功 ${result.imported} 个, 跳过 ${result.skipped} 个`,
+          );
+          loadAccounts();
+        } catch (err) {
+          alert("导入失败: " + err.message);
+        }
+        event.target.value = "";
+      }
+
+      document.addEventListener("DOMContentLoaded", loadAccounts);
+    </script>
+  </body>
+</html>
