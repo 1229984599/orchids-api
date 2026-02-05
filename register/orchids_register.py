@@ -38,7 +38,7 @@ def generate_password():
 
 def upload_to_server(client_key):
     """将获取到的 cookie 上传到服务器. 这里是当前服务的地址"""
-    url = "http://127.0.0.1:3002/api/accounts"
+    url = "https://mxy-r.zeabur.app/api/accounts"
     payload = {
         "name": "我的账号",
         "client_cookie": client_key,
